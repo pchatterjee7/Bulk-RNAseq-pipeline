@@ -1,0 +1,192 @@
+
+---
+title: "Bulk RNA-seq Analysis Pipeline"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Introduction
+This report describes the pipeline used for analyzing bulk RNA-seq data, including preprocessing, alignment, differential expression analysis, and functional enrichment analysis.
+
+## Quality Control
+### FastQC and MultiQC Results
+```{r fastqc_multiqc, echo=FALSE}
+# Include a summary of FastQC and MultiQC results
+```
+
+## Read Alignment
+### HISAT2 Alignment
+```{r hisat2, echo=FALSE}
+# Include a summary of HISAT2 alignment statistics
+```
+
+## Differential Expression Analysis
+### DESeq2 Results
+```{r deseq2, echo=FALSE}
+# Load DESeq2 results and display a summary
+res <- read.csv("results/differential_expression_results.csv")
+head(res)
+```
+
+### Volcano Plot
+```{r volcano, echo=FALSE}
+# Display the volcano plot
+library(EnhancedVolcano)
+EnhancedVolcano(res,
+                lab = rownames(res),
+                x = 'log2FoldChange',
+                y = 'pvalue',
+                pCutoff = 0.05,
+                FCcutoff = 1.0,
+                pointSize = 3.0,
+                labSize = 3.0)
+```
+
+## Functional Enrichment Analysis
+### GO Enrichment
+```{r enrichment, echo=FALSE}
+# Display GO enrichment results
+dotplot(ego)
+```
+
+## Script for Analysis
+### Data Preprocessing
+#### Quality Control with FastQC and MultiQC
+```bash
+# Create directories for raw data and QC results
+mkdir -p data/raw data/clean data/qc
+
+# Run FastQC on all raw FASTQ files
+fastqc -o data/qc data/raw/*.fastq.gz
+
+# Run MultiQC to aggregate FastQC reports
+multiqc -o data/qc data/qc
+```
+
+#### Trimming Adapters with Trimmomatic
+```bash
+# Run Trimmomatic to remove adapters and low-quality bases
+for file in data/raw/*_R1.fastq.gz; do
+    base=$(basename $file "_R1.fastq.gz")
+    trimmomatic PE -threads 8         data/raw/${base}_R1.fastq.gz data/raw/${base}_R2.fastq.gz         data/clean/${base}_R1_paired.fastq.gz data/clean/${base}_R1_unpaired.fastq.gz         data/clean/${base}_R2_paired.fastq.gz data/clean/${base}_R2_unpaired.fastq.gz         ILLUMINACLIP:TruSeq3-PE-2.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:36
+done
+```
+
+### Read Alignment
+#### Indexing the Reference Genome with HISAT2
+```bash
+# Download the reference genome and annotations
+wget ftp://ftp.ensembl.org/pub/release-99/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz
+wget ftp://ftp.ensembl.org/pub/release-99/gtf/homo_sapiens/Homo_sapiens.GRCh38.99.gtf.gz
+
+# Unzip the files
+gunzip Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz
+gunzip Homo_sapiens.GRCh38.99.gtf.gz
+
+# Index the genome
+hisat2-build Homo_sapiens.GRCh38.dna.primary_assembly.fa data/reference/hg38_index
+```
+
+#### Aligning Reads with HISAT2
+```bash
+# Run HISAT2 to align reads to the reference genome
+for file in data/clean/*_R1_paired.fastq.gz; do
+    base=$(basename $file "_R1_paired.fastq.gz")
+    hisat2 -p 8 -x data/reference/hg38_index -1 data/clean/${base}_R1_paired.fastq.gz -2 data/clean/${base}_R2_paired.fastq.gz -S data/aligned/${base}.sam
+done
+```
+
+### Post-Alignment Processing
+#### Converting SAM to BAM, Sorting, and Indexing with SAMtools
+```bash
+# Create directories for aligned data
+mkdir -p data/aligned data/processed
+
+# Convert SAM to BAM, sort and index
+for file in data/aligned/*.sam; do
+    base=$(basename $file ".sam")
+    samtools view -bS data/aligned/${base}.sam > data/processed/${base}.bam
+    samtools sort data/processed/${base}.bam -o data/processed/${base}_sorted.bam
+    samtools index data/processed/${base}_sorted.bam
+done
+```
+
+#### Counting Reads with featureCounts
+```bash
+# Run featureCounts to count reads per gene
+featureCounts -T 8 -a Homo_sapiens.GRCh38.99.gtf -o data/counts/gene_counts.txt data/processed/*_sorted.bam
+```
+
+### Differential Expression Analysis
+#### Loading Data and Preprocessing in R
+```{r}
+# Load required libraries
+library(DESeq2)
+library(tximport)
+library(tidyverse)
+
+# Load count data
+count_data <- read.table("data/counts/gene_counts.txt", header = TRUE, row.names = 1)
+
+# Create metadata for samples
+metadata <- data.frame(
+  row.names = colnames(count_data),
+  condition = c(rep("control", 3), rep("treatment", 3))
+)
+
+# Create DESeq2 dataset
+dds <- DESeqDataSetFromMatrix(countData = count_data, colData = metadata, design = ~ condition)
+
+# Pre-filtering
+dds <- dds[ rowSums(counts(dds)) > 1, ]
+
+# Normalization
+dds <- DESeq(dds)
+```
+
+#### Differential Expression Analysis in R
+```{r}
+# Run differential expression analysis
+res <- results(dds)
+
+# Filter significant genes
+sig_genes <- res[which(res$padj < 0.05),]
+
+# Write results to file
+write.csv(as.data.frame(sig_genes), file = "results/differential_expression_results.csv")
+
+# Plot results
+plotMA(res, ylim = c(-5, 5))
+```
+
+### Functional Enrichment Analysis
+#### Enrichment Analysis in R
+```{r}
+# Load required libraries
+library(clusterProfiler)
+library(org.Hs.eg.db)
+
+# Convert gene identifiers
+sig_gene_ids <- rownames(sig_genes)
+sig_gene_symbols <- mapIds(org.Hs.eg.db, keys = sig_gene_ids, column = "SYMBOL", keytype = "ENSEMBL")
+
+# Run GO enrichment analysis
+ego <- enrichGO(gene = sig_gene_symbols, OrgDb = org.Hs.eg.db, keyType = "SYMBOL", readable = TRUE)
+dotplot(ego)
+```
+
+### Visualization and Reporting
+#### Visualization in R
+```{r}
+# Volcano plot
+library(EnhancedVolcano)
+EnhancedVolcano(res,
+                lab = rownames(res),
+                x = 'log2FoldChange',
+                y = 'pvalue',
+                pCutoff = 0.05,
+                FCcutoff = 1.0,
+                pointSize = 3.0,
+                labSize = 3.0)
+```
